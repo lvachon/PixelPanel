@@ -4,10 +4,25 @@
 #include <WiFi.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 
+#include "FFT_signal.h"
+#include "FFT.h"
+#include "analog.h"
+
 #define BTN_DOWN 7
 #define BTN_UP 6
 #define numPoints 64
-#define numModes 5
+#define numModes 12
+
+#define MIC_BCK_PIN 3             // Clock pin from the mic.
+#define MIC_WS_PIN 9             // WS pin from the mic.
+#define MIC_DATA_PIN 11            // Data pin from the mic.
+#define MIC_CHANNEL_SELECT_PIN 10 // Pin to select the channel output from the mic. 
+
+#define SAMPLE_SIZE FFT_N
+#define SAMPLE_RATE 34910
+
+
+fft_config_t *real_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input, fft_output);
 
 uint8_t rgbPins[]  = {42, 41, 40, 38, 39, 37};
 uint8_t addrPins[] = {45, 36, 48, 35, 21};
@@ -24,44 +39,31 @@ Adafruit_Protomatter matrix(
   false);      // No double-buffering here (see "doublebuffer" example)
 
 Adafruit_LIS3DH accel = Adafruit_LIS3DH();
-
 const char* ssid = "Vachon";
 const char* password = "51cypress";
 
 #define width 64
 #define height 32
 
+long lastCheck = -300000;
+String inbound = "None";
+String outbound = "None";
+int offsetX=0;
+String oString = "Loading MBTA information...";
 
-float xCoords[numPoints];// = {0,0,0,0,0};
-float yCoords[numPoints];// = {0,0,0,0,0};
-float xVels[numPoints];// = {0,0,0,0,0};
-float yVels[numPoints];// = {0,0,0,0,0};
+int dMode=5;
+long frame=0;
 
+struct Point {
+  float x;
+  float y;
+  float vx;
+  float vy;
+  uint16_t color;
+  uint16_t color2;
+};
 
-void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(115200);
-  // Initialize matrix...
-  ProtomatterStatus status = matrix.begin();
-  Serial.print("Protomatter begin() status: ");
-  Serial.println((int)status);
-  if (!accel.begin(0x19)) {
-    Serial.println("Couldn't find accelerometer");
-  }
-  accel.setRange(LIS3DH_RANGE_4_G);   // 2, 4, 8 or 16 G!
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  pinMode(BTN_DOWN,INPUT_PULLUP);
-  pinMode(BTN_UP,INPUT_PULLUP);
-
-  for(int i=0;i<numPoints;i++){
-    xCoords[i]=random(width);
-    yCoords[i]=random(height);
-    xVels[i] = (random(width*10)-width*5)/100.0;
-    yVels[i] = (random(width*10)-width*5)/100.0;
-  }
-  
-}
+struct Point points[numPoints];
 
 uint16_t hsv565(float h, float s, float v){
    while(h<0){
@@ -119,14 +121,89 @@ uint16_t hsv565(float h, float s, float v){
   return matrix.color565(64,0,0);
 }
 
-long lastCheck = -150000;
-String inbound = "None";
-String outbound = "None";
-int offsetX=0;
-String oString = "Loading MBTA information...";
+const int numAnimFrames=48;
+uint16_t animFrames[numAnimFrames][width*height];
+int animFrame=0;
 
-int dMode=3;
-long frame=0;
+void setup() {
+  // put your setup code here, to run once:
+  fadcInit(1, A1);
+  Serial.begin(115200);
+  // Initialize matrix...
+  ProtomatterStatus status = matrix.begin();
+  Serial.print("Protomatter begin() status: ");
+  Serial.println((int)status);
+  if (!accel.begin(0x19)) {
+    Serial.println("Couldn't find accelerometer");
+  }
+  accel.setRange(LIS3DH_RANGE_4_G);   // 2, 4, 8 or 16 G!
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  pinMode(BTN_DOWN,INPUT_PULLUP);
+  pinMode(BTN_UP,INPUT_PULLUP);
+
+  for(int i=0;i<numPoints;i++){
+    points[i].x=i%width;
+    points[i].y=i/width;
+    points[i].vx = 0;
+    points[i].vy = 0;
+    points[i].color = hsv565(360*i/numPoints,1,1);
+    points[i].color2 = hsv565(360*i/numPoints,1,0.25);
+  }
+
+ 
+}
+
+
+
+
+void liveSat(String view){
+  if(millis()-lastCheck>5*60000){
+      matrix.fillScreen(matrix.color565(0,64,0));
+      matrix.show();
+      HTTPClient http;
+      http.setTimeout(60000);
+      delay(500);
+      String serverPath = "http://lucvachon.com/pixelPanelSatService.php?view="+view;
+      Serial.println("FEtching...");
+      http.begin(serverPath.c_str());
+      
+      matrix.fillScreen(matrix.color565(0,0,64));
+      matrix.show();
+      delay(500);
+      http.setTimeout(60000);
+      int httpResponseCode = http.GET();
+      uint8_t byt[6];
+      http.getStream().read(byt,4);//Discard first [] bytes (for some reason)
+      http.getStream().read(byt,3);//Discard first [] bytes (for some reason)
+      for(int frame=0;frame<numAnimFrames;frame++){
+        matrix.drawLine(frame,0,frame,height,hsv565(frame*10,1,1));
+        matrix.show();
+        for(int pixel=0;pixel<width*height;pixel++){
+          http.getStream().read(byt,3);
+          int r=(byt[0]-48)*4;
+          int g=(byt[1]-48)*4;
+          int b=(byt[2]-48)*4;
+          animFrames[frame][pixel]=matrix.color565(r,b,g);  
+        }
+        /*if(frame%2){
+          http.getStream().read(byt,4);
+          //http.getStream().read(byt,4);
+        }//Discard [] bytes every other frame (for some reason)
+        */
+      }
+      animFrame=0;
+      lastCheck=millis();
+  }
+  matrix.drawRGBBitmap(0,0,animFrames[animFrame],64,32);
+  matrix.show();
+  
+  
+  animFrame=(animFrame+1)%numAnimFrames;
+  if(!animFrame){delay(2000);}
+  delay(70);
+}
+
 
 void getMBTA(){
   //https://api-v3.mbta.com/predictions?filter[route]=CR-Middleborough&filter[stop]=place-MM-0186&api_key=a5776a64cc384c219bd536a4d1246260&include=trip,vehicle
@@ -251,9 +328,7 @@ void vapor(){
 }
 
 
-float gxs[64];
-float gys[64];
-float gzs[64];
+
 int gindex=0;
 float lastgx=0;
 float lastgy=0;
@@ -265,9 +340,9 @@ void gMeter(bool text=false){
   float gx = event.acceleration.x;
   float gy = event.acceleration.y;
   float gz = event.acceleration.z;
-  gxs[gindex]=gx-lastgx;
-  gys[gindex]=gy-lastgy;
-  gzs[gindex]=gz-lastgz;
+  points[gindex].x=gx-lastgx;
+  points[gindex].y=gy-lastgy;
+  points[gindex].vx=gz-lastgz;
   
   lastgx=lastgx*0.99+gx*0.01;
   lastgy=lastgy*0.99+gy*0.01;
@@ -276,14 +351,14 @@ void gMeter(bool text=false){
   gindex=(gindex+1)%64;
   float maxG=0.1;
   for(int i=0;i<64;i++){
-    if(abs(gxs[i])>maxG){
-      maxG=abs(gxs[i]);
+    if(abs(points[i].x)>maxG){
+      maxG=abs(points[i].x);
     }
-    if(abs(gys[i])>maxG){
-      maxG=abs(gys[i]);
+    if(abs(points[i].y)>maxG){
+      maxG=abs(points[i].y);
     }
-    if(abs(gzs[i])>maxG){
-      maxG=abs(gzs[i]);
+    if(abs(points[i].vx)>maxG){
+      maxG=abs(points[i].vx);
     }
   }
   maxG = ceil(maxG/1.0)*1.0;
@@ -295,26 +370,26 @@ void gMeter(bool text=false){
   
   for(int i=0;i<64;i++){
     int x=(width-gindex+i)%width;
-    int yX = (int)(16.0 + 16.0 * gxs[i]/maxG);
-    int yY = (int)(16.0 + 16.0 * gys[i]/maxG);
-    int yZ = (int)(16.0 + 16.0 * gzs[i]/maxG);
+    int yX = (int)(16.0 + 16.0 * points[i].x/maxG);
+    int yY = (int)(16.0 + 16.0 * points[i].y/maxG);
+    int yZ = (int)(16.0 + 16.0 * points[i].vx/maxG);
     for(int j=0;j<height;j++){
       r[j]=0;
       b[j]=0;
       g[j]=0;
     }
     for(int j=16;j!=yX;){
-      r[j]=32+(223*(16-j))/(16-yX);
+      r[j]=0+(255*(16-j))/(16-yX);
       if(yX>16){j++;}
       else{j--;}
     }
     for(int j=16;j!=yY;){
-      g[j]=32+(223*(16-j))/(16-yY);
+      g[j]=0+(255*(16-j))/(16-yY);
       if(yY>16){j++;}
       else{j--;}
     }
     for(int j=16;j!=yZ;){
-      b[j]=32+(223*(16-j))/(16-yZ);
+      b[j]=0+(255*(16-j))/(16-yZ);
       if(yZ>16){j++;}
       else{j--;}
     }
@@ -361,46 +436,217 @@ void balls(){
   matrix.fillScreen(0);
   
   for(int i=0;i<numPoints;i++){
-    matrix.drawPixel((int)(xCoords[i]),(int)(yCoords[i]),hsv565(0,0,0));
-  }
-  
-  for(int i=0;i<numPoints;i++){
-    xVels[i]+=event.acceleration.x/1000;
-    yVels[i]+=event.acceleration.y/1000;
-    if(true || (xVels[i]*xVels[i]+yVels[i]*yVels[i])>0.5){
-      xVels[i]-=xVels[i]*0.025;  
-      yVels[i]-=yVels[i]*0.025;
-    }
+    points[i].vx+=event.acceleration.x/1000;
+    points[i].vy+=event.acceleration.y/1000;
+   
+    points[i].vx-=points[i].vx*0.025;  
+    points[i].vy-=points[i].vy*0.025;
+        
+    points[i].x+=points[i].vx;
+    points[i].y+=points[i].vy;
     
-    xCoords[i]+=xVels[i];
-    yCoords[i]+=yVels[i];
-    
-    if(xCoords[i]>=width){
-      xCoords[i]-=width;
-      xVels[i] = (random(width*4)-width*2)/100.0;
-      yVels[i] = (random(width*4)-width*2)/100.0;
+    if(points[i].x>=width){
+      points[i].x-=width;
+      points[i].vx = (random(width*4)-width*2)/100.0;
+      points[i].vy = (random(width*4)-width*2)/100.0;
     }
-    if(yCoords[i]>=height){
-      yCoords[i]-=height;
-      xVels[i] = (random(width*4)-width*2)/100.0;
-      yVels[i] = (random(width*4)-width*2)/100.0;
+    if(points[i].y>=height){
+      points[i].y-=height;
+      points[i].vx = (random(width*4)-width*2)/100.0;
+      points[i].vy = (random(width*4)-width*2)/100.0;
     }
-    if(xCoords[i]<0){
-      xCoords[i]+=width;
-      xVels[i] = (random(width*4)-width*2)/100.0;
-      yVels[i] = (random(width*4)-width*2)/100.0;
+    if(points[i].x<0){
+      points[i].x+=width;
+      points[i].vx = (random(width*4)-width*2)/100.0;
+      points[i].vy = (random(width*4)-width*2)/100.0;
     }
-    if(yCoords[i]<0){
-      yCoords[i]+=height;
-      xVels[i] = (random(width*4)-width*2)/100.0;
-      yVels[i] = (random(width*4)-width*2)/100.0;
+    if(points[i].y<0){
+      points[i].y+=height;
+      points[i].vx = (random(width*4)-width*2)/100.0;
+      points[i].vy = (random(width*4)-width*2)/100.0;
     }
-    matrix.drawPixel((int)(xCoords[i]),(int)(yCoords[i]),hsv565(i*360/numPoints,1.0,1.0));
+    matrix.drawPixel((int)(points[i].x),(int)(points[i].y),points[i].color);
   }
   matrix.show();
   delay(15);
   
 }
+
+
+
+
+void fluid(){
+  sensors_event_t event;
+  accel.getEvent(&event);
+  matrix.fillScreen(0);
+  
+  for(int i=0;i<numPoints;i++){
+    float ax=0;
+    float ay=0;
+    for(int j=0;j<numPoints;j++){
+      if(j==i){continue;}
+      float d = ((points[i].x-points[j].x)*(points[i].x-points[j].x)+(points[i].y-points[j].y)*(points[i].y-points[j].y));
+      if(d<0.1){d=0.1;}
+      float f = 0.05/d;
+      float a = atan2(points[i].y-points[j].y,points[i].x-points[j].x);
+      ax+=f*cos(a);
+      ay+=f*sin(a);
+    }
+    
+    points[i].vx+=ax+event.acceleration.x/100;
+    points[i].vy+=ay+event.acceleration.y/100;
+   
+    points[i].vx-=points[i].vx*0.025;  
+    points[i].vy-=points[i].vy*0.025;
+        
+    points[i].x+=points[i].vx;
+    points[i].y+=points[i].vy;
+    
+    if(points[i].x>width){
+      points[i].x=width-points[i].vx;
+      points[i].vx *= -0.99;
+    }
+    if(points[i].y>height){
+      points[i].y=height-points[i].vy;
+      points[i].vy *= -0.99;
+    }
+    if(points[i].x<0){
+      points[i].x=0-points[i].vx;
+      points[i].vx *= -0.99;
+    }
+    if(points[i].y<0){
+      points[i].y=0-points[i].vy;
+      points[i].vy *= -0.99;
+    }
+    matrix.drawPixel((int)(points[i].x),(int)(points[i].y),points[i].color);
+    if(points[i].x>0){
+      matrix.drawPixel((int)(points[i].x)-1,(int)(points[i].y),points[i].color2);
+    }
+    if(points[i].x<width-1){
+      matrix.drawPixel((int)(points[i].x)+1,(int)(points[i].y),points[i].color2);
+    }
+    if(points[i].y>0){
+      matrix.drawPixel((int)(points[i].x),(int)(points[i].y)-1,points[i].color2);
+    }
+    if(points[i].y<height-1){
+      matrix.drawPixel((int)(points[i].x),(int)(points[i].y)+1,points[i].color2);
+    }
+  }
+  matrix.show();
+  //delay(15);
+}
+
+
+float audioGain = 0.05f;
+
+float audioNF = 1.0f;
+
+float notepow(float n){
+  float freq = 55*pow(2,n/12.0);
+  float freq2 = 55*pow(2,(n+1.25)/12.0);
+  int j = SAMPLE_SIZE*freq/(SAMPLE_RATE);
+  int k = SAMPLE_SIZE*freq2/(SAMPLE_RATE);
+  //int j = SAMPLE_SIZE*(n)/(NUM_LEDS)/6+1;
+  //int k = SAMPLE_SIZE*((n+1))/(NUM_LEDS)/6+1;
+  float sum = 0;
+  for(int i=j;i<=k;i++){
+    float pw = (sqrt(pow(real_fft_plan->output[2*i],2) + pow(real_fft_plan->output[2*i+1],2)));
+    sum+=i*pw;
+  }
+  return audioGain*(sum/((1+k-j)*(1+k-j))-audioNF);
+}
+
+
+
+void audioSpectrum(int mo){
+  //mic.read(samples);
+  
+  for (int i = 0 ; i < SAMPLE_SIZE ; i ++) { 
+    real_fft_plan->input[i] = (float)(analogReadFast(2)+analogReadFast(2)+analogReadFast(2));
+  }
+  fft_execute(real_fft_plan); 
+  int sumb=0;
+  int minPow = 255;
+  matrix.fillScreen(0);
+  for (int i = 0; i < width; i++) {
+    int b=(int)notepow((i*1.25));
+    if(b<0){b=0;}
+    if(b>255){b=255;}
+    if(b<minPow){minPow=b;}
+    sumb+=b;
+    points[i].y=points[i].y*0.5+b*0.5;
+    switch(mo){
+      case 0:
+        matrix.drawLine(i,height,i,(int)(height-points[i].y/8),hsv565(i*4,1,0.125+points[i].y/300));
+        break;
+      case 1:
+        matrix.drawLine(i,height,i,(int)(height-points[i].y/8),hsv565(360-points[i].y,1,0.125+points[i].y/300.0));
+        break;
+      case 2:
+        for(int j=height-1;j>0;j--){
+          animFrames[0][j*width+i]=animFrames[0][(j-1)*width+i];
+        }
+        animFrames[0][i]=hsv565(360-points[i].y,1,points[i].y/255.0);
+        break;
+      case 3:
+      default:
+        if(i%2){continue;}
+        for(int j=width-1;j>0;j--){
+          animFrames[0][(i/2)*width+j]=animFrames[0][i/2*width+j-1];
+        }
+        animFrames[0][(i/2)*width]=hsv565(360-points[width-1-i].y,1,points[width-1-i].y/255.0);
+        break;
+      
+    }
+  }
+  if(mo>=2){
+    matrix.drawRGBBitmap(0,0,animFrames[0],64,32);
+  }
+  matrix.show();
+  if(minPow>16 && audioNF<128){
+    audioNF*=1.01;
+  }
+  if(minPow<2 && audioNF>0.01){
+    audioNF/=1.01;
+  }
+  if(sumb/width > 128 && audioGain>0.001){audioGain*=0.95;Serial.println(String(audioGain,5));}
+  if(sumb/width < 32 && audioGain<10.0){audioGain*=1.01;Serial.println(String(audioGain,5));}
+  //delay(35);
+}
+
+float bigPeak=1025*3;
+float bigDC=1024*3;
+
+void audioScope(){
+  matrix.fillScreen(0);
+  float DC=0;
+  float peak=0;
+  for(int x=0;x<width;x++){
+    animFrames[0][x]=analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2)+analogReadFast(2);
+    DC+=animFrames[0][x];
+    if(animFrames[0][x]>peak){peak=animFrames[0][x];}
+  }
+  DC=DC/width;
+  bigDC=bigDC*0.99+DC*0.01;
+  bigPeak=bigPeak*0.9999;
+  if(peak>bigPeak){bigPeak=peak;}
+  
+  for(int x=0;x<width;x++){
+    int y=abs((height/2)*((animFrames[0][x]-bigDC)/(bigPeak-bigDC)));
+    if(y>16){y=16;}
+    for(int dy=1;dy<=y;dy++){
+      if(animFrames[0][x]>DC){
+        matrix.drawPixel(x,height/2-dy,hsv565(dy*20,1,1.0*dy/y));
+      }else{
+        matrix.drawPixel(x,height/2+dy,hsv565(dy*20,1,1.0*dy/y));
+      }
+    }
+  }
+  matrix.drawLine(0,height/2,width,height/2,hsv565(0,1,0.125));
+  matrix.show();
+  delay(15);
+}
+
 void loop() {
   // put your main code here, to run repeatedly:
   
@@ -417,18 +663,58 @@ void loop() {
     case 3:
       balls();
       break;
+    case 4:
+      fluid();
+      break;
+    case 5:
+      audioSpectrum(0);
+      break;
+    case 6:
+      audioSpectrum(1);
+      break;
+    case 7:
+      audioSpectrum(2);
+      break;
+    case 8:
+      audioSpectrum(3);
+      break;
+    case 9:
+      audioScope();
+      break;
+    case 10:
+      liveSat("GEOCOLOR");
+      break;
+    case 11:
+      liveSat("Sandwich");
+      break;
     default:
       vapor();
   }
   if(!digitalRead(BTN_DOWN)){
     if(dMode>0){
       dMode--;
+      lastCheck=millis()-5*60000;
+      if(dMode==2 || dMode==1){
+        for(int i=0;i<numPoints;i++){
+          points[i].x=0;
+          points[i].y=0;
+          points[i].vx=0;
+        }
+      }
       delay(500);
     }
   }
   if(!digitalRead(BTN_UP)){
     if(dMode<numModes){
       dMode++;
+      lastCheck=millis()-5*60000;
+      if(dMode==2 || dMode==1){
+        for(int i=0;i<numPoints;i++){
+          points[i].x=0;
+          points[i].y=0;
+          points[i].vx=0;
+        }
+      }
       delay(500);
     }
   }
