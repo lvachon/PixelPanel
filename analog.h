@@ -38,7 +38,7 @@ extern "C" {
 
 //#define FADC_CAL_USE                 // Comment out to remove everything calibration-related
 #define FADC_RESOLUTION           12 // Set ADC to 12-bit ADC resolution
-#define FADC_ATTEN          ADC_2_5db // Set ADC to 11dB attenuation
+#define FADC_ATTEN          ADC_11db // Set ADC to 11dB attenuation
 
 #ifdef FADC_CAL_USE
 #define FADC_CAL_SIZE              6 // Calibration table with (1**N)=64 points (RAM use: 2 bytes per point)

@@ -543,7 +543,7 @@ float audioNF = 1.0f;
 
 float notepow(float n){
   float freq = 55*pow(2,n/12.0);
-  float freq2 = 55*pow(2,(n+1.25)/12.0);
+  float freq2 = 55*pow(2,(n+1.4)/12.0);
   int j = SAMPLE_SIZE*freq/(SAMPLE_RATE);
   int k = SAMPLE_SIZE*freq2/(SAMPLE_RATE);
   //int j = SAMPLE_SIZE*(n)/(NUM_LEDS)/6+1;
@@ -553,7 +553,7 @@ float notepow(float n){
     float pw = (sqrt(pow(real_fft_plan->output[2*i],2) + pow(real_fft_plan->output[2*i+1],2)));
     sum+=i*pw;
   }
-  return audioGain*(sum/((1+k-j)*(1+k-j))-audioNF);
+  return audioGain*(sum/((1+k-j))-audioNF);
 }
 
 
@@ -567,12 +567,14 @@ void audioSpectrum(int mo){
   fft_execute(real_fft_plan); 
   int sumb=0;
   int minPow = 255;
+  int maxPow = 0;
   matrix.fillScreen(0);
   for (int i = 0; i < width; i++) {
-    int b=(int)notepow((i*1.25));
+    int b=(int)notepow((i*1.4));
     if(b<0){b=0;}
     if(b>255){b=255;}
     if(b<minPow){minPow=b;}
+    if(b>maxPow){maxPow=b;}
     sumb+=b;
     points[i].y=points[i].y*0.5+b*0.5;
     switch(mo){
@@ -609,8 +611,8 @@ void audioSpectrum(int mo){
   if(minPow<2 && audioNF>0.01){
     audioNF/=1.01;
   }
-  if(sumb/width > 128 && audioGain>0.001){audioGain*=0.95;Serial.println(String(audioGain,5));}
-  if(sumb/width < 32 && audioGain<10.0){audioGain*=1.01;Serial.println(String(audioGain,5));}
+  if((sumb/width > 128 || maxPow>=255) && audioGain>0.0001){audioGain*=0.95;Serial.println(String(audioGain,5));}
+  if(sumb/width < 32  && audioGain<10.0){audioGain*=1.01;Serial.println(String(audioGain,5));}
   //delay(35);
 }
 
